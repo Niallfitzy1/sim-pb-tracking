@@ -102,7 +102,7 @@ struct BestLaps {
     category: MyLapAndBestLap,
 }
 
-const LINE_LENGTH: usize = 128;
+const LINE_LENGTH: usize = 80;
 
 fn pad_string(input: String) -> String {
     if input.len() > LINE_LENGTH {
