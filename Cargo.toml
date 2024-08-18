@@ -1,0 +1,21 @@
+[package]
+name = "SimLeaderboards"
+description = "A simple leaderboard tracker for Assetto Corsa Competizione"
+version = "0.1.0"
+edition = "2021"
+repository = "https://github.com/Niallfitzy1/sim-pb-tracking"
+homepage = "https://github.com/Niallfitzy1/sim-pb-tracking"
+license = "MIT"
+
+[dependencies]
+dotenv = "0.15.0"
+humantime = "2.1.0"
+sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls", "postgres", "chrono"] }
+simetry = "0.2.3"
+tokio = { version = "1.0.0", features = ["rt", "rt-multi-thread", "macros"] }
+chrono = "0.4.38"
+chrono-humanize = "0.2.3"
+crossterm = "0.28.1"
+discord-webhook2 = "0.3.1"
+anyhow = "1.0.86"
+
