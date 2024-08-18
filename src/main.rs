@@ -222,6 +222,7 @@ async fn main() -> Result<()> {
                                     car.category,
                                     track
                                 ))
+                                .username(format!("{}'s ACC Bot", driver.name))
                             }))
                             .await?;
                         refresh = true;
