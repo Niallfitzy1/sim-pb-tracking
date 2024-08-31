@@ -3,7 +3,6 @@ mod r#track;
 
 use crate::track::TrackName;
 use anyhow::Result;
-use chrono_humanize::{Accuracy, HumanTime, Tense};
 use crossterm::cursor::{MoveToNextLine, MoveToPreviousLine};
 use crossterm::style::{Attribute, SetAttribute};
 use crossterm::terminal::{Clear, ClearType};
@@ -17,6 +16,7 @@ use discord_webhook2::webhook::DiscordWebhook;
 use dotenv::dotenv;
 use r#cars::Car;
 use simetry::assetto_corsa_competizione;
+use simetry::assetto_corsa_competizione::Time;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{Pool, Postgres};
 use std::env;
@@ -46,11 +46,27 @@ struct CarRow {
 
 trait LapTime {
     fn lap_time_ms(&self) -> i64;
-    fn created_at(&self) -> chrono::DateTime<chrono::Utc>;
 }
 
+#[derive(Clone)]
+struct BestLapData {
+    driver_id: i64,
+    track_id: i64,
+    created_at: chrono::DateTime<chrono::Utc>,
+    lap_time_ms: i64,
+    car_id: i64,
+}
+
+impl LapTime for BestLapData {
+    fn lap_time_ms(&self) -> i64 {
+        self.lap_time_ms
+    }
+}
+
+#[allow(dead_code)]
 #[derive(sqlx::FromRow, Clone)]
 struct BestLap {
+    id: i64,
     driver_id: i64,
     track_id: i64,
     created_at: chrono::DateTime<chrono::Utc>,
@@ -61,10 +77,6 @@ struct BestLap {
 impl LapTime for BestLapWithDriver {
     fn lap_time_ms(&self) -> i64 {
         self.lap_time_ms
-    }
-
-    fn created_at(&self) -> chrono::DateTime<chrono::Utc> {
-        self.created_at
     }
 }
 
@@ -89,10 +101,6 @@ struct MyLapAndBestLap {
 impl LapTime for BestLap {
     fn lap_time_ms(&self) -> i64 {
         self.lap_time_ms
-    }
-
-    fn created_at(&self) -> chrono::DateTime<chrono::Utc> {
-        self.created_at
     }
 }
 
@@ -180,8 +188,16 @@ async fn main() -> Result<()> {
             .flush()?;
 
         let mut lap_number = 0;
-        let mut best_laps =
-            refresh_laps(&pool, &driver, &track_row, &car_row, true, printer.by_ref()).await?;
+        let mut best_laps = refresh_laps(
+            &pool,
+            &driver,
+            &track_row,
+            &car_row,
+            None,
+            true,
+            printer.by_ref(),
+        )
+        .await?;
 
         while let Some(sim_state) = client.next_sim_state().await {
             let mut refresh = false;
@@ -195,7 +211,7 @@ async fn main() -> Result<()> {
                             sim_state.graphics.lap_timing.best.millis < t.lap_time_ms as i32
                         }))
                     {
-                        let new_best_time = BestLap {
+                        let new_best_time = BestLapData {
                             driver_id: driver.id,
                             track_id: track_row.id,
                             created_at: chrono::Utc::now(),
@@ -203,23 +219,67 @@ async fn main() -> Result<()> {
                             car_id: car_row.id,
                         };
 
-                        sqlx::query!(
-                "INSERT INTO best_lap (driver_id, track_id, created_at, lap_time_ms, car_id) VALUES ($1, $2, $3, $4, $5)",
-                new_best_time.driver_id,
-                new_best_time.track_id,
-                new_best_time.created_at,
-                new_best_time.lap_time_ms,
-                new_best_time.car_id
-            ).execute(&pool).await?;
+                        sqlx::query_as!(
+                            BestLap,
+                "INSERT INTO best_lap (driver_id, track_id, car_id, created_at, lap_time_ms) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (driver_id, track_id, car_id) DO UPDATE set lap_time_ms=$5 RETURNING *",
+                &new_best_time.driver_id,
+                &new_best_time.track_id,
+                &new_best_time.car_id,
+                &new_best_time.created_at,
+                &new_best_time.lap_time_ms
+            ).fetch_one(&pool).await?;
+
+                        let faster_by = best_laps
+                            .car
+                            .mine
+                            .clone()
+                            .map(|t| {
+                                format!(
+                                    " (-{}ms)",
+                                    pad_lap_segment(
+                                        (t.lap_time_ms - new_best_time.lap_time_ms) as u64,
+                                        3
+                                    )
+                                    .to_string()
+                                )
+                            })
+                            .unwrap_or("".to_string());
+
+                        let fastest_for_category = best_laps
+                            .category
+                            .overall
+                            .clone()
+                            .map(|t| t.lap_time_ms > new_best_time.lap_time_ms)
+                            .unwrap_or(false);
+                        let fastest_for_car = best_laps
+                            .car
+                            .overall
+                            .clone()
+                            .map(|t| t.lap_time_ms > new_best_time.lap_time_ms)
+                            .unwrap_or(false);
+                        let my_fastest_for_category = best_laps
+                            .category
+                            .mine
+                            .clone()
+                            .map(|t| t.lap_time_ms > new_best_time.lap_time_ms)
+                            .unwrap_or(false);
+
+                        let message_prefix = if fastest_for_category {
+                            format!("{} fastest", car.category).to_string()
+                        } else if fastest_for_car {
+                            "Car fastest".to_string()
+                        } else if my_fastest_for_category {
+                            format!("{} PB", car.category).to_string()
+                        } else {
+                            "Car PB".to_string()
+                        };
 
                         discord_webhook
                             .send(&Message::new(|m| {
                                 m.content(format!(
-                                    "{} has a new best lap of {} on {} ({}) in {}",
-                                    driver.name,
-                                    format_lap_time(Some(new_best_time.clone()), false),
+                                    "{message_prefix} {}{faster_by} in {} on {}",
+                                    format_lap_time(Some(new_best_time.clone())),
                                     car.name,
-                                    car.category,
                                     track
                                 ))
                                 .username(format!("{}'s ACC Bot", driver.name))
@@ -230,12 +290,19 @@ async fn main() -> Result<()> {
                 }
             }
 
+            let last_lap = if sim_state.graphics.lap_timing.last.millis < i32::MAX {
+                Some(sim_state.graphics.lap_timing.last.clone())
+            } else {
+                None
+            };
+
             if refresh {
                 best_laps = refresh_laps(
                     &pool,
                     &driver,
                     &track_row,
                     &car_row,
+                    last_lap,
                     false,
                     printer.by_ref(),
                 )
@@ -250,6 +317,7 @@ async fn refresh_laps(
     driver: &Driver,
     track: &TrackRow,
     car: &CarRow,
+    last_lap: Option<Time>,
     is_init: bool,
     printer: &mut Stdout,
 ) -> Result<BestLaps> {
@@ -317,40 +385,53 @@ async fn refresh_laps(
             overall: best_overall_for_category,
         },
     };
-    log_laps(result.clone(), !is_init, printer)?;
+    log_laps(result.clone(), last_lap, !is_init, printer)?;
     Ok(result.clone())
 }
 
-fn format_lap_time<T: LapTime>(lap_time: Option<T>, with_relative_set_at: bool) -> String {
-    let time = lap_time
-        .map(|t| {
-            let lap_duration = Duration::from_millis(t.lap_time_ms() as u64);
-            format!(
-                "{}:{}:{} set {}",
-                lap_duration.as_secs() / 60,
-                lap_duration.as_secs() % 60,
-                lap_duration.subsec_millis(),
-                &*HumanTime::from(t.created_at()).to_text_en(Accuracy::Rough, Tense::Past)
-            )
-        })
-        .unwrap_or("None".to_string());
-    if with_relative_set_at {
-        time
+fn pad_lap_segment(segment: u64, length: usize) -> String {
+    let input = segment.to_string();
+    if input.len() >= length {
+        input.to_string()
     } else {
-        time.split(" set ").next().unwrap().to_string()
+        let mut padded = String::with_capacity(length);
+        for _ in 0..(length - input.len()) {
+            padded.push('0');
+        }
+        padded.push_str(&*input);
+        padded
     }
 }
 
-fn log_laps(laps: BestLaps, refresh: bool, printer: &mut Stdout) -> Result<()> {
-    let is_my_lap_for_car_fastest = laps.car.clone().mine.is_some_and(|mine| {
+fn format_lap_time<T: LapTime>(lap_time: Option<T>) -> String {
+    lap_time
+        .map(|t| {
+            let lap_duration = Duration::from_millis(t.lap_time_ms() as u64);
+            format!(
+                "{}:{}:{}",
+                lap_duration.as_secs() / 60,
+                pad_lap_segment(lap_duration.as_secs() % 60, 2),
+                pad_lap_segment(lap_duration.subsec_millis() as u64, 3),
+            )
+        })
+        .unwrap_or("None".to_string())
+}
+
+fn log_laps(
+    laps: BestLaps,
+    last_lap: Option<Time>,
+    refresh: bool,
+    printer: &mut Stdout,
+) -> Result<()> {
+    let is_my_lap_for_car_fastest = laps.car.mine.clone().is_some_and(|mine| {
         laps.car
-            .clone()
             .overall
+            .clone()
             .is_some_and(|overall| mine.id == overall.id)
     });
 
     if refresh {
-        printer.execute(MoveToPreviousLine(2))?;
+        printer.execute(MoveToPreviousLine(3))?;
     }
 
     if is_my_lap_for_car_fastest {
@@ -358,8 +439,8 @@ fn log_laps(laps: BestLaps, refresh: bool, printer: &mut Stdout) -> Result<()> {
             .execute(MoveToNextLine(1))?
             .execute(SetForegroundColor(Color::Green))?
             .execute(Print(pad_string(format!(
-                "Your lap of {} is the fastest for this car!",
-                format_lap_time(laps.clone().car.mine, true),
+                "You are fastest in this car: {}",
+                format_lap_time(laps.clone().car.mine),
             ))))?
             .execute(ResetColor)?
             .execute(SetAttribute(Attribute::Reset))?;
@@ -368,19 +449,28 @@ fn log_laps(laps: BestLaps, refresh: bool, printer: &mut Stdout) -> Result<()> {
             .execute(MoveToNextLine(1))?
             .execute(SetForegroundColor(Color::Blue))?
             .execute(Print(pad_string(format!(
-                "For this car: Personal best: {}, Best overall: {}",
-                format_lap_time(laps.clone().car.mine, true),
-                format_lap_time(laps.car.overall, true),
+                "Car PB: {} Best: {} Diff: {}ms",
+                format_lap_time(laps.car.mine.clone()),
+                format_lap_time(laps.car.overall.clone()),
+                laps.car
+                    .mine
+                    .clone()
+                    .map(|t| {
+                        (t.lap_time_ms
+                            - laps.car.overall.clone().map(|t| t.lap_time_ms).unwrap_or(0))
+                        .to_string()
+                    })
+                    .unwrap_or("".to_string())
             ))))?
             .execute(ResetColor)?
             .execute(SetAttribute(Attribute::Reset))?;
-    } else if laps.car.overall.is_some() {
+    } else if laps.car.overall.clone().is_some() {
         printer
             .execute(MoveToNextLine(1))?
             .execute(SetForegroundColor(Color::Red))?
             .execute(Print(pad_string(format!(
-                "You have not set a lap time for this car, Best overall: {}",
-                format_lap_time(laps.car.overall, true),
+                "No PB in this car. Best: {}",
+                format_lap_time(laps.car.overall.clone()),
             ))))?
             .execute(ResetColor)?
             .execute(SetAttribute(Attribute::Reset))?;
@@ -389,7 +479,7 @@ fn log_laps(laps: BestLaps, refresh: bool, printer: &mut Stdout) -> Result<()> {
             .execute(MoveToNextLine(1))?
             .execute(SetForegroundColor(Color::Magenta))?
             .execute(Print(pad_string(
-                "There are no lap times for this car".to_string(),
+                "There are no lap times in this car".to_string(),
             )))?
             .execute(ResetColor)?
             .execute(SetAttribute(Attribute::Reset))?;
@@ -397,8 +487,8 @@ fn log_laps(laps: BestLaps, refresh: bool, printer: &mut Stdout) -> Result<()> {
 
     let is_my_lap_for_category_fastest = laps.category.clone().mine.is_some_and(|mine| {
         laps.category
-            .clone()
             .overall
+            .clone()
             .is_some_and(|overall| mine.id == overall.id)
     });
 
@@ -407,8 +497,8 @@ fn log_laps(laps: BestLaps, refresh: bool, printer: &mut Stdout) -> Result<()> {
             .execute(MoveToNextLine(1))?
             .execute(SetForegroundColor(Color::Green))?
             .execute(Print(pad_string(format!(
-                "Your lap of {} is the fastest for this category!",
-                format_lap_time(laps.category.mine, true)
+                "You are fastest in this category {}",
+                format_lap_time(laps.category.mine.clone())
             ))))?
             .execute(ResetColor)?
             .execute(SetAttribute(Attribute::Reset))?;
@@ -417,19 +507,33 @@ fn log_laps(laps: BestLaps, refresh: bool, printer: &mut Stdout) -> Result<()> {
             .execute(MoveToNextLine(1))?
             .execute(SetForegroundColor(Color::Blue))?
             .execute(Print(pad_string(format!(
-                "For this category: Personal best: {}, Best overall: {}",
-                format_lap_time(laps.category.mine, true),
-                format_lap_time(laps.category.overall, true),
+                "Category PB: {} Best: {} Diff: {}ms",
+                format_lap_time(laps.category.mine.clone()),
+                format_lap_time(laps.category.overall.clone()),
+                laps.category
+                    .mine
+                    .clone()
+                    .map(|t| {
+                        (t.lap_time_ms
+                            - laps
+                                .category
+                                .overall
+                                .clone()
+                                .map(|t| t.lap_time_ms)
+                                .unwrap_or(0))
+                        .to_string()
+                    })
+                    .unwrap_or("".to_string())
             ))))?
             .execute(ResetColor)?
             .execute(SetAttribute(Attribute::Reset))?;
-    } else if laps.category.overall.is_some() {
+    } else if laps.category.overall.clone().is_some() {
         printer
             .execute(MoveToNextLine(1))?
             .execute(SetForegroundColor(Color::Red))?
             .execute(Print(pad_string(format!(
-                "You have not set a lap time for this category, Best overall: {}",
-                format_lap_time(laps.category.overall, true),
+                "No PB in this category. Best: {}",
+                format_lap_time(laps.category.overall.clone()),
             ))))?
             .execute(ResetColor)?
             .execute(SetAttribute(Attribute::Reset))?;
@@ -438,7 +542,43 @@ fn log_laps(laps: BestLaps, refresh: bool, printer: &mut Stdout) -> Result<()> {
             .execute(MoveToNextLine(1))?
             .execute(SetForegroundColor(Color::Magenta))?
             .execute(Print(pad_string(
-                "There are no lap times for this category".to_string(),
+                "No lap times in this category".to_string(),
+            )))?
+            .execute(ResetColor)?
+            .execute(SetAttribute(Attribute::Reset))?;
+    }
+
+    if last_lap.is_some() {
+        let last_lap_ms = last_lap.clone().unwrap().millis as i64;
+        printer
+            .execute(MoveToNextLine(1))?
+            .execute(SetForegroundColor(Color::White))?
+            .execute(Print(pad_string(
+                format!(
+                    "Last: {} Car diff: {}ms Category diff {}ms",
+                    last_lap.unwrap().text,
+                    laps.car
+                        .overall
+                        .clone()
+                        .map(|t| (last_lap_ms - t.lap_time_ms).to_string())
+                        .unwrap_or("∞".to_string()),
+                    laps.category
+                        .clone()
+                        .overall
+                        .clone()
+                        .map(|t| (last_lap_ms - t.lap_time_ms).to_string())
+                        .unwrap_or("∞".to_string())
+                )
+                .to_string(),
+            )))?
+            .execute(ResetColor)?
+            .execute(SetAttribute(Attribute::Reset))?;
+    } else {
+        printer
+            .execute(MoveToNextLine(1))?
+            .execute(SetForegroundColor(Color::White))?
+            .execute(Print(pad_string(
+                "Stop staring at me & start driving".to_string(),
             )))?
             .execute(ResetColor)?
             .execute(SetAttribute(Attribute::Reset))?;
