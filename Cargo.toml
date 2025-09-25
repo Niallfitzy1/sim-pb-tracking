@@ -1,8 +1,8 @@
 [package]
 name = "SimLeaderboards"
 description = "A simple leaderboard tracker for Assetto Corsa Competizione"
-version = "0.1.3"
-edition = "2021"
+version = "0.1.4"
+edition = "2024"
 repository = "https://github.com/Niallfitzy1/sim-pb-tracking"
 homepage = "https://github.com/Niallfitzy1/sim-pb-tracking"
 license = "MIT"
@@ -13,8 +13,8 @@ sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls", "postgres",
 simetry = "0.2.3"
 tokio = { version = "1.0.0", features = ["rt", "rt-multi-thread", "macros"] }
 chrono = "0.4.38"
-crossterm = "0.28.1"
-discord-webhook2 = "0.3.1"
+crossterm = "0.29.0"
+discord-webhook2 = "0.4.3"
 anyhow = "1.0.86"
 async-trait = "0.1.81"
 serde = { version = "1.0.208", features = ["derive"] }
