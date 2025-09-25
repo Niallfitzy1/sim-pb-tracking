@@ -61,8 +61,9 @@ impl TelemetryClient for AccClient {
                 } else {
                     None
                 };
-
                 Some(SimState {
+                    status: g.status.clone(),
+                    session_type: g.session.clone(),
                     completed_laps: g.completed_laps,
                     lap_timing: LapTiming {
                         last_ms,

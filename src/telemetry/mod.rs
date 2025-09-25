@@ -1,5 +1,6 @@
 pub mod acc;
 
+use simetry::assetto_corsa_competizione::{SessionType, Status};
 use std::time::Duration;
 
 #[derive(Clone, Debug)]
@@ -18,6 +19,8 @@ pub struct LapTiming {
 
 #[derive(Clone, Debug)]
 pub struct SimState {
+    pub status: Status,
+    pub session_type: SessionType,
     pub completed_laps: i32,
     pub lap_timing: LapTiming,
 }
