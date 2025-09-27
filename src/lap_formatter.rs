@@ -25,12 +25,17 @@ pub fn format_lap_time<T: LapTime>(lap_time: Option<T>) -> String {
 }
 
 pub fn duration_as_string(lap_duration: Duration) -> String {
-    format!(
+    let as_string = format!(
         "{}:{}:{}",
         lap_duration.as_secs() / 60,
         pad_lap_segment(lap_duration.as_secs() % 60, 2),
         pad_lap_segment(lap_duration.subsec_millis() as u64, 3),
-    )
+    );
+    if as_string.starts_with("0:") {
+        // Remove the un-needed minute from the start _only_
+        return as_string.chars().skip(2).collect();
+    }
+    as_string
 }
 
 pub fn diff_lap_time<T: LapTime>(previous_lap_time: Option<i64>, new_lap_time: T) -> String {

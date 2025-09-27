@@ -10,7 +10,7 @@ mod persistence;
 mod telemetry;
 
 use crate::cars::Car;
-use crate::lap_formatter::{diff_lap_time, format_lap_time, pad_lap_segment};
+use crate::lap_formatter::{diff_lap_time, duration_as_string, format_lap_time, pad_lap_segment};
 use crate::notifications::{DiscordNotifier, Notifier};
 use crate::persistence::{
     BestLapData, BestLaps, CarRow, Driver, LapTime, MyLapAndBestLap, Repository, TrackRow,
@@ -376,12 +376,12 @@ fn main() -> anyhow::Result<()> {
                 let mut session_best = None;
                 let mut session_best_ms = None;
                 let mut current_sector_index = 0;
+                let mut previous_sector_start_ms = 0;
 
                 while let Some(sim_state) = telemetry.next_state().await {
                     if sim_state.status.ne(&Status::Live) && sim_state.status.ne(&Status::Pause) {
                         break;
                     }
-
                     let mut refresh = false;
                     let mut latest_log = None;
                     is_valid = is_valid && sim_state.current_lap.is_valid;
@@ -389,7 +389,7 @@ fn main() -> anyhow::Result<()> {
                     if sim_state
                         .current_lap
                         .current_sector_index
-                        .ne(&current_sector_index)
+                        .gt(&current_sector_index)
                     {
                         {
                             let mut s = state_bg.lock().unwrap();
@@ -397,9 +397,32 @@ fn main() -> anyhow::Result<()> {
                                 "Sector {}/{} complete: Time: {}",
                                 current_sector_index + 1,
                                 telemetry.static_info().number_of_sectors,
-                                sim_state.current_lap.last_sector_ms
+                                duration_as_string(Duration::from_millis(
+                                    (sim_state.current_lap.last_sector_ms
+                                        - previous_sector_start_ms)
+                                        as u64
+                                ))
                             ));
                         }
+                        previous_sector_start_ms = sim_state.current_lap.last_sector_ms;
+                        current_sector_index = sim_state.current_lap.current_sector_index;
+                    } else if sim_state.current_lap.current_sector_index.eq(&0)
+                        && sim_state.lap_timing.last_ms.is_some()
+                        && current_sector_index.gt(&0)
+                    {
+                        let last_lap = sim_state.lap_timing.last_ms.unwrap();
+                        let final_sector_time = last_lap - previous_sector_start_ms;
+                        println!("Final sector time: {}", final_sector_time);
+                        {
+                            let mut s = state_bg.lock().unwrap();
+                            s.info_log.push(format!(
+                                "Sector {}/{} complete: Time: {}",
+                                telemetry.static_info().number_of_sectors,
+                                telemetry.static_info().number_of_sectors,
+                                duration_as_string(Duration::from_millis(final_sector_time as u64))
+                            ));
+                        }
+                        previous_sector_start_ms = 0;
                         current_sector_index = sim_state.current_lap.current_sector_index;
                     }
 
