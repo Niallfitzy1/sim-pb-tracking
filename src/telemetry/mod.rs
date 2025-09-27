@@ -1,7 +1,6 @@
 pub mod acc;
 
 use simetry::assetto_corsa_competizione::{SessionType, Status};
-use std::time::Duration;
 
 #[derive(Clone, Debug)]
 pub struct StaticInfo {
@@ -42,5 +41,5 @@ pub trait TelemetryClient: Send {
 }
 
 pub trait TelemetryFactory: Send + Sync {
-    async fn connect(&self, poll_interval: Duration) -> anyhow::Result<Box<dyn TelemetryClient>>;
+    async fn connect(&self) -> Box<dyn TelemetryClient>;
 }

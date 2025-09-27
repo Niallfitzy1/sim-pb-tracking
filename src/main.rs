@@ -274,37 +274,23 @@ fn main() -> anyhow::Result<()> {
                 s.status = "Connecting…".into();
                 s.driver_name = driver_row.clone().name;
                 s.last_update = Some(chrono::Local::now());
-                s.info_log.push("Connecting to Sim".into());
             }
 
-            let mut telemetry = AccFactory::new()
-                .connect(Duration::from_secs(1))
-                .await
-                .unwrap();
-
             loop {
-                let connected = telemetry.connected().await;
-                if !connected {
-                    {
-                        let mut s = state_bg.lock().unwrap();
-                        s.status = "Waiting for session…".into();
-                        // Reset state to default values
-                        s.car_model = "".into();
-                        s.category_name = "".into();
-                        s.track_name = "".into();
-                        s.session_best = None;
-                        s.last_lap = None;
-                        s.laps_run = 0;
-                        s.best_car = None;
-                        s.best_category = None;
-                        s.last_update = Some(chrono::Local::now());
-                        s.info_log
-                            .push("Connected, waiting for session to start".into());
-                    }
-                }
-
-                while !telemetry.connected().await {
-                    tokio::time::sleep(Duration::from_millis(500)).await;
+                let mut telemetry = AccFactory::new().connect().await;
+                {
+                    let mut s = state_bg.lock().unwrap();
+                    s.status = "Waiting for session…".into();
+                    // Reset state to default values
+                    s.car_model = "".into();
+                    s.category_name = "".into();
+                    s.track_name = "".into();
+                    s.session_best = None;
+                    s.last_lap = None;
+                    s.laps_run = 0;
+                    s.best_car = None;
+                    s.best_category = None;
+                    s.last_update = Some(chrono::Local::now());
                 }
 
                 {
@@ -340,9 +326,8 @@ fn main() -> anyhow::Result<()> {
                     tokio::time::sleep(Duration::from_millis(500)).await;
                 }
 
-                let telemetry_static_info = telemetry.static_info();
-                let track_name = telemetry_static_info.track_name;
-                let car_model = telemetry_static_info.car_model;
+                let track_name = telemetry.static_info().track_name;
+                let car_model = telemetry.static_info().car_model;
                 let track: TrackName = track_name.parse().expect("Unknown track");
                 let track_row = repo.upsert_track(&track_name).await.unwrap();
 
@@ -358,7 +343,8 @@ fn main() -> anyhow::Result<()> {
                     s.car_model = car.name.to_string();
                     s.last_update = Some(chrono::Local::now());
                     s.laps_run = 0;
-                    s.info_log.push("Session started".into());
+                    s.info_log
+                        .push(format!("=== {} session at {} started ===", car.name, track).into());
                 }
 
                 let mut bests = refresh_laps(&repo, &driver_row, &track_row, &car_row).await;
@@ -383,7 +369,6 @@ fn main() -> anyhow::Result<()> {
                         diff_last: diff_lap_time(None, best.clone()),
                         driver: best.clone().driver_name,
                     });
-                    s.info_log.push("Existing records loaded".into());
                     s.last_update = Some(chrono::Local::now());
                 }
                 let mut lap_number = 0;
@@ -391,24 +376,10 @@ fn main() -> anyhow::Result<()> {
                 let mut session_best = None;
                 let mut session_best_ms = None;
                 let mut current_sector_index = 0;
-                let mut current_sectors: Vec<i64> = Vec::new();
 
                 while let Some(sim_state) = telemetry.next_state().await {
                     if sim_state.status.ne(&Status::Live) && sim_state.status.ne(&Status::Pause) {
-                        {
-                            let mut s = state_bg.lock().unwrap();
-                            s.status = "Session ended".into();
-                            s.car_model = "".into();
-                            s.track_name = "".into();
-                            s.session_best = None;
-                            s.last_lap = None;
-                            s.laps_run = 0;
-                            s.best_car = None;
-                            s.best_category = None;
-                            s.last_update = Some(chrono::Local::now());
-                            s.info_log.push("Session ended".into());
-                        }
-                        continue;
+                        break;
                     }
 
                     let mut refresh = false;
@@ -420,8 +391,6 @@ fn main() -> anyhow::Result<()> {
                         .current_sector_index
                         .ne(&current_sector_index)
                     {
-                        current_sectors.push(sim_state.current_lap.last_sector_ms.into());
-
                         {
                             let mut s = state_bg.lock().unwrap();
                             s.info_log.push(format!(
@@ -560,8 +529,6 @@ fn main() -> anyhow::Result<()> {
                             }
                         }
                         is_valid = true;
-                        current_sectors = Vec::new();
-                        current_sector_index = 0;
                     }
 
                     if refresh {
@@ -573,7 +540,14 @@ fn main() -> anyhow::Result<()> {
                         s.status =
                             format!("Processing session in state: {:?}", sim_state.status).into();
                         s.laps_run = lap_number.into();
-                        s.last_lap = sim_state.lap_timing.last_text.clone();
+                        if (sim_state.lap_timing.last_text.is_some()) {
+                            s.last_lap = format!(
+                                "{}{}",
+                                sim_state.lap_timing.last_text.clone().unwrap(),
+                                if is_valid { "" } else { " (Invalid)" }
+                            )
+                            .into();
+                        }
                         s.session_best = session_best.clone();
                         s.last_update = Some(chrono::Local::now());
                         s.best_category =
@@ -599,6 +573,15 @@ fn main() -> anyhow::Result<()> {
                             s.info_log.push(latest_log.unwrap());
                         }
                     }
+                }
+
+                // Clean-up post-session
+                {
+                    let mut s = state_bg.lock().unwrap();
+                    s.status = "Session ended".into();
+                    s.last_update = Some(chrono::Local::now());
+                    s.info_log
+                        .push(format!("=== {} session at {} ended ===", car.name, track).into());
                 }
             }
         });
