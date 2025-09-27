@@ -7,6 +7,7 @@ use std::time::Duration;
 pub struct StaticInfo {
     pub track_name: String,
     pub car_model: String,
+    pub number_of_sectors: i32,
 }
 
 #[derive(Clone, Debug)]
@@ -18,11 +19,19 @@ pub struct LapTiming {
 }
 
 #[derive(Clone, Debug)]
+pub struct CurrentLap {
+    pub is_valid: bool,
+    pub last_sector_ms: i64,
+    pub current_sector_index: i32,
+}
+
+#[derive(Clone, Debug)]
 pub struct SimState {
     pub status: Status,
     pub session_type: SessionType,
     pub completed_laps: i32,
     pub lap_timing: LapTiming,
+    pub current_lap: CurrentLap,
 }
 
 #[async_trait::async_trait]

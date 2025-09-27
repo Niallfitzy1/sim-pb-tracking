@@ -3,6 +3,7 @@
 mod r#cars;
 mod r#track;
 use crate::track::TrackName;
+use std::vec::Vec;
 mod lap_formatter;
 mod notifications;
 mod persistence;
@@ -159,7 +160,7 @@ impl App for MyApp {
             ui.label(format!("Laps Run: {}", st.laps_run));
             ui.separator();
             egui::ScrollArea::vertical().show(ui, |ui| {
-                for line in &st.info_log {
+                for line in st.info_log.iter().rev() {
                     ui.label(line);
                 }
             });
@@ -248,7 +249,7 @@ fn main() -> anyhow::Result<()> {
         session_best: None,
         best_car: None,
         best_category: None,
-        info_log: vec![],
+        info_log: Vec::new(),
         last_update: None,
     }));
 
@@ -273,6 +274,7 @@ fn main() -> anyhow::Result<()> {
                 s.status = "Connecting…".into();
                 s.driver_name = driver_row.clone().name;
                 s.last_update = Some(chrono::Local::now());
+                s.info_log.push("Connecting to Sim".into());
             }
 
             let mut telemetry = AccFactory::new()
@@ -281,7 +283,8 @@ fn main() -> anyhow::Result<()> {
                 .unwrap();
 
             loop {
-                while !telemetry.connected().await {
+                let connected = telemetry.connected().await;
+                if !connected {
                     {
                         let mut s = state_bg.lock().unwrap();
                         s.status = "Waiting for session…".into();
@@ -295,13 +298,35 @@ fn main() -> anyhow::Result<()> {
                         s.best_car = None;
                         s.best_category = None;
                         s.last_update = Some(chrono::Local::now());
+                        s.info_log
+                            .push("Connected, waiting for session to start".into());
                     }
+                }
+
+                while !telemetry.connected().await {
                     tokio::time::sleep(Duration::from_millis(500)).await;
                 }
+
                 {
                     let mut s = state_bg.lock().unwrap();
                     s.status = "Connected".into();
                     s.last_update = Some(chrono::Local::now());
+                }
+
+                let is_hot_lap = telemetry
+                    .next_state()
+                    .await
+                    .unwrap()
+                    .session_type
+                    .eq(&SessionType::Hotlap);
+                if !is_hot_lap {
+                    {
+                        let mut s = state_bg.lock().unwrap();
+                        s.status = "Only Hotlap is supported".into();
+                        s.last_update = Some(chrono::Local::now());
+                        s.info_log
+                            .push("Detected invalid session, processing disabled".into());
+                    }
                 }
 
                 while telemetry.connected().await
@@ -312,12 +337,9 @@ fn main() -> anyhow::Result<()> {
                         .session_type
                         .ne(&SessionType::Hotlap)
                 {
-                    {
-                        let mut s = state_bg.lock().unwrap();
-                        s.status = "Only Hotlap is supported".into();
-                        s.last_update = Some(chrono::Local::now());
-                    }
+                    tokio::time::sleep(Duration::from_millis(500)).await;
                 }
+
                 let telemetry_static_info = telemetry.static_info();
                 let track_name = telemetry_static_info.track_name;
                 let car_model = telemetry_static_info.car_model;
@@ -336,9 +358,9 @@ fn main() -> anyhow::Result<()> {
                     s.car_model = car.name.to_string();
                     s.last_update = Some(chrono::Local::now());
                     s.laps_run = 0;
+                    s.info_log.push("Session started".into());
                 }
 
-                let mut lap_number = 0;
                 let mut bests = refresh_laps(&repo, &driver_row, &track_row, &car_row).await;
                 {
                     let mut s = state_bg.lock().unwrap();
@@ -361,10 +383,15 @@ fn main() -> anyhow::Result<()> {
                         diff_last: diff_lap_time(None, best.clone()),
                         driver: best.clone().driver_name,
                     });
+                    s.info_log.push("Existing records loaded".into());
                     s.last_update = Some(chrono::Local::now());
                 }
+                let mut lap_number = 0;
+                let mut is_valid = true;
                 let mut session_best = None;
                 let mut session_best_ms = None;
+                let mut current_sector_index = 0;
+                let mut current_sectors: Vec<i64> = Vec::new();
 
                 while let Some(sim_state) = telemetry.next_state().await {
                     if sim_state.status.ne(&Status::Live) && sim_state.status.ne(&Status::Pause) {
@@ -379,28 +406,43 @@ fn main() -> anyhow::Result<()> {
                             s.best_car = None;
                             s.best_category = None;
                             s.last_update = Some(chrono::Local::now());
+                            s.info_log.push("Session ended".into());
                         }
-                        println!(
-                            "Session {} {} ended",
-                            car.name.to_string(),
-                            track.to_string()
-                        );
                         continue;
                     }
 
                     let mut refresh = false;
                     let mut latest_log = None;
-                    println!("Session best lap: {:?}", sim_state.lap_timing.clone());
+                    is_valid = is_valid && sim_state.current_lap.is_valid;
+
+                    if sim_state
+                        .current_lap
+                        .current_sector_index
+                        .ne(&current_sector_index)
+                    {
+                        current_sectors.push(sim_state.current_lap.last_sector_ms.into());
+
+                        {
+                            let mut s = state_bg.lock().unwrap();
+                            s.info_log.push(format!(
+                                "Sector {}/{} complete: Time: {}",
+                                current_sector_index + 1,
+                                telemetry.static_info().number_of_sectors,
+                                sim_state.current_lap.last_sector_ms
+                            ));
+                        }
+                        current_sector_index = sim_state.current_lap.current_sector_index;
+                    }
 
                     if sim_state.completed_laps.ne(&lap_number) {
                         lap_number = sim_state.completed_laps;
                         refresh = true;
                         latest_log = Some(format!(
-                            "Finished lap {} with time {}",
+                            "{}Finished lap {} with time {}",
+                            if is_valid { "" } else { "[Invalid Lap] " },
                             lap_number,
                             sim_state.lap_timing.last_text.clone().unwrap_or("-".into())
                         ));
-                        println!("{}", latest_log.clone().unwrap());
 
                         if sim_state.lap_timing.best_ms.is_some() {
                             session_best = sim_state.lap_timing.best_text.clone();
@@ -420,7 +462,6 @@ fn main() -> anyhow::Result<()> {
                                     lap_time_ms: current_best_time,
                                     car_id: car_row.id,
                                 };
-
                                 repo.upsert_best_lap(&new_best_time).await.unwrap();
 
                                 let faster_by = bests
@@ -459,12 +500,50 @@ fn main() -> anyhow::Result<()> {
                                     .unwrap_or(false);
 
                                 let message_prefix = if fastest_for_category {
+                                    latest_log = Some(format!(
+                                        "Finished lap {} with time {} ({} fastest)",
+                                        lap_number,
+                                        sim_state
+                                            .lap_timing
+                                            .last_text
+                                            .clone()
+                                            .unwrap_or("-".into()),
+                                        car.category
+                                    ));
                                     format!("{} fastest", car.category).to_string()
                                 } else if fastest_for_car {
+                                    latest_log = Some(format!(
+                                        "Finished lap {} with time {} (Car fastest)",
+                                        lap_number,
+                                        sim_state
+                                            .lap_timing
+                                            .last_text
+                                            .clone()
+                                            .unwrap_or("-".into())
+                                    ));
                                     "Car fastest".to_string()
                                 } else if my_fastest_for_category {
+                                    latest_log = Some(format!(
+                                        "Finished lap {} with time {} ({})",
+                                        lap_number,
+                                        sim_state
+                                            .lap_timing
+                                            .last_text
+                                            .clone()
+                                            .unwrap_or("-".into()),
+                                        format!("{} PB", car.category)
+                                    ));
                                     format!("{} PB", car.category).to_string()
                                 } else {
+                                    latest_log = Some(format!(
+                                        "Finished lap {} with time {} (Car PB)",
+                                        lap_number,
+                                        sim_state
+                                            .lap_timing
+                                            .last_text
+                                            .clone()
+                                            .unwrap_or("-".into())
+                                    ));
                                     "Car PB".to_string()
                                 };
 
@@ -480,6 +559,9 @@ fn main() -> anyhow::Result<()> {
                                 refresh = true;
                             }
                         }
+                        is_valid = true;
+                        current_sectors = Vec::new();
+                        current_sector_index = 0;
                     }
 
                     if refresh {
@@ -513,6 +595,9 @@ fn main() -> anyhow::Result<()> {
                             diff_last: diff_lap_time(session_best_ms, best.clone()),
                             driver: best.clone().driver_name,
                         });
+                        if latest_log.is_some() {
+                            s.info_log.push(latest_log.unwrap());
+                        }
                     }
                 }
             }

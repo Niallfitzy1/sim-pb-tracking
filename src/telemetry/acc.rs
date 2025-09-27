@@ -1,4 +1,6 @@
-use crate::telemetry::{LapTiming, SimState, StaticInfo, TelemetryClient, TelemetryFactory};
+use crate::telemetry::{
+    CurrentLap, LapTiming, SimState, StaticInfo, TelemetryClient, TelemetryFactory,
+};
 use anyhow::Result;
 use simetry::assetto_corsa_competizione::Client;
 use std::time::Duration;
@@ -34,6 +36,7 @@ impl TelemetryClient for AccClient {
         StaticInfo {
             track_name: s.track.clone(),
             car_model: s.car_model.clone(),
+            number_of_sectors: s.sector_count.clone(),
         }
     }
 
@@ -70,6 +73,11 @@ impl TelemetryClient for AccClient {
                         best_ms,
                         best_text,
                         last_text,
+                    },
+                    current_lap: CurrentLap {
+                        is_valid: g.is_valid_lap,
+                        last_sector_ms: g.lap_timing.last_sector_ms as i64,
+                        current_sector_index: g.current_sector_index,
                     },
                 })
             }
