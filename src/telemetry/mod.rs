@@ -1,11 +1,12 @@
 pub mod acc;
 
-use std::time::Duration;
+use simetry::assetto_corsa_competizione::{SessionType, Status};
 
 #[derive(Clone, Debug)]
 pub struct StaticInfo {
     pub track_name: String,
     pub car_model: String,
+    pub number_of_sectors: i32,
 }
 
 #[derive(Clone, Debug)]
@@ -17,9 +18,19 @@ pub struct LapTiming {
 }
 
 #[derive(Clone, Debug)]
+pub struct CurrentLap {
+    pub is_valid: bool,
+    pub last_sector_ms: i64,
+    pub current_sector_index: i32,
+}
+
+#[derive(Clone, Debug)]
 pub struct SimState {
+    pub status: Status,
+    pub session_type: SessionType,
     pub completed_laps: i32,
     pub lap_timing: LapTiming,
+    pub current_lap: CurrentLap,
 }
 
 #[async_trait::async_trait]
@@ -30,5 +41,5 @@ pub trait TelemetryClient: Send {
 }
 
 pub trait TelemetryFactory: Send + Sync {
-    async fn connect(&self, poll_interval: Duration) -> anyhow::Result<Box<dyn TelemetryClient>>;
+    async fn connect(&self) -> Box<dyn TelemetryClient>;
 }

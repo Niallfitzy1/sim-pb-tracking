@@ -1,7 +1,7 @@
-use crate::telemetry::{LapTiming, SimState, StaticInfo, TelemetryClient, TelemetryFactory};
-use anyhow::Result;
+use crate::telemetry::{
+    CurrentLap, LapTiming, SimState, StaticInfo, TelemetryClient, TelemetryFactory,
+};
 use simetry::assetto_corsa_competizione::Client;
-use std::time::Duration;
 
 pub struct AccFactory;
 
@@ -12,10 +12,10 @@ impl AccFactory {
 }
 
 impl TelemetryFactory for AccFactory {
-    async fn connect(&self, poll_interval: Duration) -> Result<Box<dyn TelemetryClient>> {
-        Ok(Box::new(AccClient {
-            inner: Client::connect(poll_interval).await,
-        }))
+    async fn connect(&self) -> Box<dyn TelemetryClient> {
+        Box::new(AccClient {
+            inner: Client::try_connect().await.unwrap(),
+        })
     }
 }
 
@@ -25,16 +25,17 @@ pub struct AccClient {
 
 #[async_trait::async_trait]
 impl TelemetryClient for AccClient {
-    async fn connected(&mut self) -> bool {
-        self.inner.next_sim_state().await.is_some()
-    }
-
     fn static_info(&self) -> StaticInfo {
         let s = self.inner.static_data();
         StaticInfo {
             track_name: s.track.clone(),
             car_model: s.car_model.clone(),
+            number_of_sectors: s.sector_count.clone(),
         }
+    }
+
+    async fn connected(&mut self) -> bool {
+        self.inner.next_sim_state().await.is_some()
     }
 
     async fn next_state(&mut self) -> Option<SimState> {
@@ -61,14 +62,20 @@ impl TelemetryClient for AccClient {
                 } else {
                     None
                 };
-
                 Some(SimState {
+                    status: g.status.clone(),
+                    session_type: g.session.clone(),
                     completed_laps: g.completed_laps,
                     lap_timing: LapTiming {
                         last_ms,
                         best_ms,
                         best_text,
                         last_text,
+                    },
+                    current_lap: CurrentLap {
+                        is_valid: g.is_valid_lap,
+                        last_sector_ms: g.lap_timing.last_sector_ms as i64,
+                        current_sector_index: g.current_sector_index,
                     },
                 })
             }
